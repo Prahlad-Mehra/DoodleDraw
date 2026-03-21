@@ -1,14 +1,5 @@
 package main
 
-import (
-	"github.com/gorilla/websocket"
-)
-
-type message struct {
-	conn *websocket.Conn
-	msg  []byte
-}
-
 type Hub struct {
 	//registered clients
 	clients map[*client]bool
@@ -17,15 +8,15 @@ type Hub struct {
 	//Unregsiter the client from the hub
 	unregister chan *client
 	//Inbound message from the clients
-	brodcast chan message
+	brodcast chan *Message
 }
 
-func (h *Hub) NewHub() *Hub {
+func NewHub() *Hub {
 	return &Hub{
 		clients:    make(map[*client]bool),
 		register:   make(chan *client),
 		unregister: make(chan *client),
-		brodcast:   make(chan message),
+		brodcast:   make(chan *Message),
 	}
 }
 

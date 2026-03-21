@@ -20,41 +20,21 @@ func greet(w http.ResponseWriter, r *http.Request) {
 	w.Write(msg)
 }
 
-func socketHandler(w http.ResponseWriter, r *http.Request) {
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, "internal serve error", http.StatusInternalServerError)
-		log.Println("[ERROR]", err)
-	}
-	defer conn.Close()
-	//log about new connection
-	log.Println("[LOG] New websocket connection!")
-
-	for {
-		_, payload, err := conn.ReadMessage()
-		if err != nil {
-			log.Println("[ERROR] error while reading message, err=", err)
-			break
-		}
-
-		msg := string(payload)
-		log.Printf("[Message] %s", msg)
-
-		//writing back to the websocket connection
-		err = conn.WriteMessage(1, []byte("pong"))
-		if err != nil {
-			log.Println("[Error] not able to send message, err=", err)
-			break
-		}
-	}
-}
-
 func main() {
-	fmt.Println("Hello ws-server!")
+	fmt.Println("ws-server starting at port:3000")
+
+	//creating a new demo hub and running it in a saperate goroutine
+	hub := NewHub()
+	go hub.Run()
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", greet)
-	mux.HandleFunc("/ws", socketHandler)
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		//we need to validate and check which hub this client belongs to and also validate if it has a password for hub or not.
+
+		//here pass the hub , w responseWriter and r *http.Request
+		SocketHandler(hub, w, r)
+	})
 
 	server := &http.Server{
 		Addr:    ":3000",
