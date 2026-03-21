@@ -12,6 +12,10 @@
     cursor: crosshair;
 }
 
+.drawing-canvas.is-selecting {
+    cursor: default;
+}
+
 .shape-toolbar {
     position: absolute;
     top: 20px;
@@ -28,6 +32,9 @@
 }
 
 .shape-toolbar__button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
     border: 1px solid rgba(255, 255, 255, 0.12);
     border-radius: 8px;
     background: transparent;
@@ -44,6 +51,17 @@
 .shape-toolbar__button:hover {
     border-color: rgba(255, 255, 255, 0.28);
     color: white;
+}
+
+.shape-toolbar__icon {
+    display: inline-flex;
+    width: 16px;
+    height: 16px;
+}
+
+.shape-toolbar__icon svg {
+    width: 100%;
+    height: 100%;
 }
 
 .shape-toolbar__button.is-active {
