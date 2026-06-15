@@ -1,31 +1,34 @@
 package main
 
 import (
-	"bytes"
+	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 )
 
 var (
-	newline      = []byte{'\n'}
-	space        = []byte{' '}
 	writeWait    = 10 * time.Second
 	pongWait     = 60 * time.Second
 	pingPeriod   = (pongWait * 9) / 10
-	maxMessageSz = int64(512)
+	maxMessageSz = int64(1 << 20)
+	clientSeq    uint64
 )
 
-type Message struct {
-	conn *websocket.Conn
-	msg  []byte
-}
 type client struct {
+	id   string
 	conn *websocket.Conn
 	send chan []byte
 	hub  *Hub
+}
+
+func nextClientID() string {
+	id := atomic.AddUint64(&clientSeq, 1)
+	return "client-" + strconv.FormatUint(id, 10)
 }
 
 func SocketHandler(hub *Hub, w http.ResponseWriter, r *http.Request) {
@@ -39,6 +42,7 @@ func SocketHandler(hub *Hub, w http.ResponseWriter, r *http.Request) {
 	log.Println("[LOG] New websocket connection!")
 	//cretae the new client and register to its hub
 	client := &client{
+		id:   nextClientID(),
 		conn: conn,
 		send: make(chan []byte, 256),
 		hub:  hub,
@@ -68,13 +72,13 @@ func (c *client) readPump() {
 			}
 			break
 		}
-		payload = bytes.TrimSpace(bytes.Replace(payload, newline, space, -1))
 
-		message := &Message{
-			conn: c.conn,
-			msg:  payload,
+		var message SocketMessage
+		if err := json.Unmarshal(payload, &message); err != nil {
+			c.hub.sendError(c, "invalid json message")
+			continue
 		}
-		c.hub.brodcast <- message
+		c.hub.inbound <- inboundMessage{client: c, message: message}
 	}
 }
 

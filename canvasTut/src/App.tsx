@@ -3,8 +3,14 @@
  because this is not a AI generated SLOP CODE with 🚀✅💡⚒️ comments
 */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import "./App.css";
+import {
+    createCollaborationClient,
+    getRoomId,
+    type CollaborationClient,
+    type ServerMessage,
+} from "./collaboration";
 import { ShapeToolbar } from "./components/ShapeToolbar";
 import {
     drawScene,
@@ -23,11 +29,13 @@ type SelectionHandle =
     | "bottomLeft"
     | "bottomRight";
 
-type InteractionState =
-    | {
-          kind: "drawing";
-          startPos: Pos;
-      }
+type DrawingInteraction = {
+    kind: "drawing";
+    shapeId: string;
+    startPos: Pos;
+};
+
+type SelectionInteraction =
     | {
           kind: "moving";
           shapeId: string;
@@ -41,19 +49,147 @@ type InteractionState =
           originalShape: SceneNode;
       };
 
+type InteractionState = DrawingInteraction | SelectionInteraction;
+
+type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+
+const SYNC_THROTTLE_MS = 33;
+
 function App() {
     const canvasRef = useRef<HTMLCanvasElement | null>(null);
     const sceneGraphRef = useRef<Map<string, SceneNode>>(new Map());
     const draftShapeRef = useRef<SceneNode | null>(null);
     const interactionRef = useRef<InteractionState | null>(null);
+    const pendingLockInteractionRef = useRef<SelectionInteraction | null>(null);
     const nextShapeIdRef = useRef<number>(0);
     const activeToolRef = useRef<ToolType>("rect");
+    const selectedShapeIdRef = useRef<string | null>(null);
+    const collaborationRef = useRef<CollaborationClient | null>(null);
+    const clientIdRef = useRef<string | null>(null);
+    const remoteLocksRef = useRef<Map<string, string>>(new Map());
+    const scheduleRenderRef = useRef<() => void>(() => undefined);
+    const lastSyncAtRef = useRef<number>(0);
     const [activeTool, setActiveTool] = useState<ToolType>("rect");
-    const [selectedShapeId, setSelectedShapeId] = useState<string | null>(null);
+    const [roomId] = useState(getRoomId);
+    const [connectionStatus, setConnectionStatus] =
+        useState<ConnectionStatus>("connecting");
+
+    const isShapeInLocalInteraction = useCallback((shapeId: string) => {
+        return (
+            interactionRef.current?.shapeId === shapeId ||
+            draftShapeRef.current?.id === shapeId
+        );
+    }, []);
+
+    const handleServerMessage = useCallback(
+        (message: ServerMessage) => {
+            switch (message.type) {
+                case "welcome": {
+                    clientIdRef.current = message.payload.clientId;
+                    sceneGraphRef.current = new Map(
+                        message.payload.scene.map((shape) => [shape.id, shape]),
+                    );
+                    remoteLocksRef.current = new Map(
+                        Object.entries(message.payload.locks),
+                    );
+                    scheduleRenderRef.current();
+                    return;
+                }
+                case "shape:upsert": {
+                    if (isShapeInLocalInteraction(message.payload.shape.id)) {
+                        return;
+                    }
+
+                    sceneGraphRef.current.set(
+                        message.payload.shape.id,
+                        message.payload.shape,
+                    );
+                    scheduleRenderRef.current();
+                    return;
+                }
+                case "shape:delete": {
+                    sceneGraphRef.current.delete(message.payload.shapeId);
+                    if (selectedShapeIdRef.current === message.payload.shapeId) {
+                        selectedShapeIdRef.current = null;
+                    }
+                    scheduleRenderRef.current();
+                    return;
+                }
+                case "lock:granted": {
+                    remoteLocksRef.current.set(
+                        message.payload.shapeId,
+                        message.payload.ownerId || "",
+                    );
+
+                    if (message.payload.ownerId !== clientIdRef.current) {
+                        return;
+                    }
+
+                    const pending = pendingLockInteractionRef.current;
+                    if (pending?.shapeId === message.payload.shapeId) {
+                        interactionRef.current = pending;
+                        pendingLockInteractionRef.current = null;
+                        return;
+                    }
+
+                    collaborationRef.current?.send({
+                        type: "lock:release",
+                        payload: { shapeId: message.payload.shapeId },
+                    });
+                    return;
+                }
+                case "lock:denied": {
+                    remoteLocksRef.current.set(
+                        message.payload.shapeId,
+                        message.payload.ownerId || "",
+                    );
+
+                    if (
+                        pendingLockInteractionRef.current?.shapeId ===
+                        message.payload.shapeId
+                    ) {
+                        pendingLockInteractionRef.current = null;
+                        interactionRef.current = null;
+                        scheduleRenderRef.current();
+                    }
+                    return;
+                }
+                case "lock:release": {
+                    remoteLocksRef.current.delete(message.payload.shapeId);
+                    return;
+                }
+                case "error": {
+                    console.warn(
+                        "WebSocket server error:",
+                        message.payload.message,
+                    );
+                    return;
+                }
+            }
+        },
+        [isShapeInLocalInteraction],
+    );
 
     useEffect(() => {
         activeToolRef.current = activeTool;
     }, [activeTool]);
+
+    useEffect(() => {
+        const client = createCollaborationClient({
+            roomId,
+            onStatusChange: setConnectionStatus,
+            onMessage: (message) => {
+                handleServerMessage(message);
+            },
+        });
+
+        collaborationRef.current = client;
+
+        return () => {
+            collaborationRef.current = null;
+            client.close();
+        };
+    }, [handleServerMessage, roomId]);
 
     useEffect(() => {
         const canvas = canvasRef.current;
@@ -72,7 +208,7 @@ function App() {
                 height: canvas.height,
                 shapes: sceneGraphRef.current.values(),
                 draftShape: draftShapeRef.current,
-                selectedShapeId,
+                selectedShapeId: selectedShapeIdRef.current,
             });
         };
 
@@ -86,12 +222,36 @@ function App() {
             });
         };
 
+        scheduleRenderRef.current = scheduleRender;
+
+        const setSelectedShape = (shapeId: string | null) => {
+            selectedShapeIdRef.current = shapeId;
+            scheduleRender();
+        };
+
         const getPointerPosition = (e: MouseEvent): Pos => {
             const rect = canvas.getBoundingClientRect();
             return {
                 x: e.clientX - rect.left,
                 y: e.clientY - rect.top,
             };
+        };
+
+        const sendShapeUpsert = (
+            shape: SceneNode,
+            force = false,
+            committed = true,
+        ) => {
+            const now = performance.now();
+            if (!force && now - lastSyncAtRef.current < SYNC_THROTTLE_MS) {
+                return;
+            }
+
+            lastSyncAtRef.current = now;
+            collaborationRef.current?.send({
+                type: "shape:upsert",
+                payload: { shape, committed },
+            });
         };
 
         const handleResize = () => {
@@ -102,6 +262,7 @@ function App() {
 
         const handleMouseDown = (e: MouseEvent) => {
             if (e.button !== 0) return;
+            if (!clientIdRef.current) return;
 
             const pointerPos = getPointerPosition(e);
 
@@ -110,46 +271,53 @@ function App() {
                 const hitShape = getHitShape(shapes, pointerPos);
 
                 if (!hitShape) {
-                    setSelectedShapeId(null);
+                    setSelectedShape(null);
                     interactionRef.current = null;
-                    scheduleRender();
+                    pendingLockInteractionRef.current = null;
                     return;
                 }
 
-                setSelectedShapeId(hitShape.id);
+                setSelectedShape(hitShape.id);
 
                 const handle = getShapeHandleAtPoint(hitShape, pointerPos);
+                const nextInteraction: SelectionInteraction = handle
+                    ? {
+                          kind: "resizing",
+                          shapeId: hitShape.id,
+                          handle,
+                          originalShape: { ...hitShape },
+                      }
+                    : {
+                          kind: "moving",
+                          shapeId: hitShape.id,
+                          pointerOffset: {
+                              x: pointerPos.x - hitShape.startPos.x,
+                              y: pointerPos.y - hitShape.startPos.y,
+                          },
+                          originalShape: { ...hitShape },
+                      };
 
-                if (handle) {
-                    interactionRef.current = {
-                        kind: "resizing",
-                        shapeId: hitShape.id,
-                        handle,
-                        originalShape: { ...hitShape },
-                    };
-                } else {
-                    interactionRef.current = {
-                        kind: "moving",
-                        shapeId: hitShape.id,
-                        pointerOffset: {
-                            x: pointerPos.x - hitShape.startPos.x,
-                            y: pointerPos.y - hitShape.startPos.y,
-                        },
-                        originalShape: { ...hitShape },
-                    };
-                }
-
+                pendingLockInteractionRef.current = nextInteraction;
+                interactionRef.current = null;
+                collaborationRef.current?.send({
+                    type: "lock:request",
+                    payload: { shapeId: hitShape.id },
+                });
                 scheduleRender();
                 return;
             }
 
+            const shapeId = `${clientIdRef.current}:${nextShapeIdRef.current}`;
+            nextShapeIdRef.current += 1;
+
             interactionRef.current = {
                 kind: "drawing",
+                shapeId,
                 startPos: pointerPos,
             };
-            setSelectedShapeId(null);
+            setSelectedShape(null);
             draftShapeRef.current = {
-                id: `draft-${nextShapeIdRef.current}`,
+                id: shapeId,
                 startPos: pointerPos,
                 endPos: pointerPos,
                 shape: activeToolRef.current,
@@ -167,12 +335,15 @@ function App() {
                 const draftShape = draftShapeRef.current;
                 if (!draftShape) return;
 
-                draftShapeRef.current = {
-                    id: `draft-${nextShapeIdRef.current}`,
+                const nextDraft = {
+                    id: interaction.shapeId,
                     startPos: interaction.startPos,
                     endPos: pointerPos,
                     shape: draftShape.shape,
                 };
+
+                draftShapeRef.current = nextDraft;
+                sendShapeUpsert(nextDraft, false, false);
                 scheduleRender();
                 return;
             }
@@ -181,29 +352,38 @@ function App() {
             if (!activeShape) return;
 
             if (interaction.kind === "moving") {
-                const width = interaction.originalShape.endPos.x - interaction.originalShape.startPos.x;
-                const height = interaction.originalShape.endPos.y - interaction.originalShape.startPos.y;
+                const width =
+                    interaction.originalShape.endPos.x -
+                    interaction.originalShape.startPos.x;
+                const height =
+                    interaction.originalShape.endPos.y -
+                    interaction.originalShape.startPos.y;
                 const nextStartPos = {
                     x: pointerPos.x - interaction.pointerOffset.x,
                     y: pointerPos.y - interaction.pointerOffset.y,
                 };
-
-                sceneGraphRef.current.set(interaction.shapeId, {
+                const nextShape = {
                     ...activeShape,
                     startPos: nextStartPos,
                     endPos: {
                         x: nextStartPos.x + width,
                         y: nextStartPos.y + height,
                     },
-                });
+                };
+
+                sceneGraphRef.current.set(interaction.shapeId, nextShape);
+                sendShapeUpsert(nextShape);
                 scheduleRender();
                 return;
             }
 
-            sceneGraphRef.current.set(
-                interaction.shapeId,
-                resizeShape(interaction.originalShape, interaction.handle, pointerPos),
+            const nextShape = resizeShape(
+                interaction.originalShape,
+                interaction.handle,
+                pointerPos,
             );
+            sceneGraphRef.current.set(interaction.shapeId, nextShape);
+            sendShapeUpsert(nextShape);
             scheduleRender();
         };
 
@@ -214,30 +394,44 @@ function App() {
             if (!interaction || interaction.kind !== "drawing") return;
 
             const committedShape: SceneNode = {
-                id: `${nextShapeIdRef.current}`,
+                id: interaction.shapeId,
                 startPos: interaction.startPos,
                 endPos,
                 shape: draftShape.shape,
             };
 
             sceneGraphRef.current.set(committedShape.id, committedShape);
-            nextShapeIdRef.current += 1;
             interactionRef.current = null;
             draftShapeRef.current = null;
-            setSelectedShapeId(committedShape.id);
+            setSelectedShape(committedShape.id);
+            sendShapeUpsert(committedShape, true);
             scheduleRender();
         };
 
         const handleMouseUp = (e: MouseEvent) => {
             const interaction = interactionRef.current;
-            if (!interaction) return;
+
+            if (!interaction) {
+                pendingLockInteractionRef.current = null;
+                return;
+            }
 
             if (interaction.kind === "drawing") {
                 finishShape(getPointerPosition(e));
                 return;
             }
 
+            const shape = sceneGraphRef.current.get(interaction.shapeId);
+            if (shape) {
+                sendShapeUpsert(shape, true);
+            }
+
+            collaborationRef.current?.send({
+                type: "lock:release",
+                payload: { shapeId: interaction.shapeId },
+            });
             interactionRef.current = null;
+            pendingLockInteractionRef.current = null;
             scheduleRender();
         };
 
@@ -249,6 +443,7 @@ function App() {
         handleResize();
 
         return () => {
+            scheduleRenderRef.current = () => undefined;
             if (frameId) {
                 window.cancelAnimationFrame(frameId);
             }
@@ -257,11 +452,14 @@ function App() {
             window.removeEventListener("mousemove", handleMouseMove);
             window.removeEventListener("mouseup", handleMouseUp);
         };
-    }, [selectedShapeId]);
+    }, []);
 
     return (
         <main className="app-shell">
             <ShapeToolbar activeTool={activeTool} onSelect={setActiveTool} />
+            <div className="collaboration-status">
+                Room: {roomId} | {connectionStatus}
+            </div>
             <canvas
                 ref={canvasRef}
                 className={`drawing-canvas${

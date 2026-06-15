@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Websocket chat</title>
+</head>
+<body>
+    <h1>Webscoket Chats</h1>
+    <input type="text" id="input">
+    <button onclick="SendToServer('red')" >Submit</button><br>
+    <div id="messages"></div>
+</body>
+<script>
+    const socket = new WebSocket("ws://localhost:3000/ws");
+    if(socket.readyState === WebSocket.OPEN){
+        console.log(`websocket is ready with state = ${WebSocket.OPEN}`)
+    }
+    socket.onopen = () => {
+      console.log("Connected to server");
+    };
+
+    socket.onmessage = (event) => {
+      console.log("Message from server:", event.data);
+      msg_from_server(event.data);
+    };
+
+    socket.onclose = () => {
+      console.log("Disconnected from server");
+    };
+
+    socket.onerror = (error) => {
+      console.error("WebSocket error:", error);
+    };
+
+    const input = document.getElementById("input");
+    input.addEventListener("keydown",(event)=>{
+        if(event.key === "Enter"){
+            SendToServer("blue");
+        }
+    });
+
+    const msgBox = document.getElementById("messages");
+
+    function msg_from_server(data) {
+        msgBox.innerHTML += `<p style="color: black; font-size: 20px" >Person: ${data}</p>`;
+    }
+    function SendToServer(color) {
+        const val = input.value;
+        input.value = "";
+        msgBox.innerHTML += `<p style="color: ${color}; font-size: 20px" >YOU: ${val}</p>`;
+        socket.send(val);
+    }
+</script>
+</html>

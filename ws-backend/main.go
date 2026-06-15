@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 
 	"github.com/gorilla/websocket"
 )
@@ -11,6 +12,7 @@ import (
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
+	CheckOrigin:     checkOrigin,
 }
 
 func greet(w http.ResponseWriter, r *http.Request) {
@@ -23,16 +25,15 @@ func greet(w http.ResponseWriter, r *http.Request) {
 func main() {
 	fmt.Println("ws-server starting at port:3000")
 
-	//creating a new demo hub and running it in a saperate goroutine
-	hub := NewHub()
-	go hub.Run()
+	roomManager := NewRoomManager()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", greet)
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "index.html")
+	})
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		//we need to validate and check which hub this client belongs to and also validate if it has a password for hub or not.
-
-		//here pass the hub , w responseWriter and r *http.Request
+		roomID := r.URL.Query().Get("room")
+		hub := roomManager.Get(roomID)
 		SocketHandler(hub, w, r)
 	})
 
@@ -43,4 +44,29 @@ func main() {
 	if err := server.ListenAndServe(); err != nil {
 		panic(err)
 	}
+}
+
+func checkOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+
+	originHost := parsed.Host
+	if originHost == r.Host {
+		return true
+	}
+
+	allowedDevOrigins := map[string]bool{
+		"localhost:5173": true,
+		"127.0.0.1:5173": true,
+		"localhost:3000": true,
+		"127.0.0.1:3000": true,
+	}
+	return allowedDevOrigins[originHost]
 }
